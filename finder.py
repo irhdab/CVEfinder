@@ -636,15 +636,49 @@ def scan_system(os_type=None, notify=False, min_severity="LOW", api_key=None, th
     # Create progress bar
     progress_bar = tqdm(total=len(packages), desc="Scanning packages")
     
-    # Create thread pool
-    threads_list = []
-    active_threads = 0
-    max_threads = threads
+    # Process packages in batches to control thread count
+    batch_size = min(threads, 10)  # Limit max concurrent threads
     
-    for package in packages:
-        # Limit the number of concurrent threads
-        while active_threads >= max_threads:
-            # Wait for some threads to complete
-            for t in threads_list[:]:
-                if not t.is_alive():
-                    threads_list.remove(t)
+    for i in range(0, len(packages), batch_size):
+        batch = packages[i:i+batch_size]
+        threads_list = []
+        
+        # Create and start threads for this batch
+        for package in batch:
+            thread = threading.Thread(
+                target=scan_package_worker,
+                args=(package, conn, api_key, vulnerable_packages, lock, progress_bar)
+            )
+            threads_list.append(thread)
+            thread.start()
+        
+        # Wait for all threads in this batch to complete
+        for thread in threads_list:
+            thread.join()
+    
+    # Close progress bar
+    progress_bar.close()
+    
+    # Filter vulnerabilities by severity
+    filtered_packages = []
+    for package in vulnerable_packages:
+        filtered_vulns = []
+        for vuln in package["vulnerabilities"]:
+            severity = vuln.get("severity", "UNKNOWN").upper()
+            if severity_levels.get(severity, 0) >= min_level:
+                filtered_vulns.append(vuln)
+        
+        if filtered_vulns:
+            package_copy = package.copy()
+            package_copy["vulnerabilities"] = filtered_vulns
+            filtered_packages.append(package_copy)
+    
+    # Generate notification if requested
+    if notify and filtered_packages:
+        notification = generate_notification(filtered_packages)
+        print("\n" + notification)
+    
+    # Print summary
+    print(f"\nScan complete. Found {len(filtered_packages)} vulnerable packages with {min_severity} or higher severity.")
+    
+    return filtered_packages
